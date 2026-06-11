@@ -1,5 +1,7 @@
+import asyncio
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 
 # Make the repo root importable so `examples.customer_service.main` resolves.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -7,8 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from agents import Runner
 from examples.customer_service.main import triage_agent, AirlineAgentContext
 
-# Installed via the Setup command (branch SDK from the monorepo). Captures
-# handoffs + sub-agent attribution. Degrades gracefully if absent.
+# Captures handoffs + sub-agent attribution for the multi-agent trace.
 try:
     from pipelines.odyssey.adapters.openai_agents import pipelines_run_hooks
 except Exception:
@@ -25,5 +26,14 @@ def run(task_input, *, proxy_url, run_token):
     kwargs = {"context": AirlineAgentContext()}
     if pipelines_run_hooks is not None:
         kwargs["hooks"] = pipelines_run_hooks()
-    result = Runner.run_sync(triage_agent, instruction, **kwargs)
+
+    async def _go():
+        return await Runner.run(triage_agent, instruction, **kwargs)
+
+    # The platform runs this entrypoint inside an already-running event loop
+    # (the E2B code-interpreter kernel), so Runner.run_sync() — which starts
+    # its own loop — raises. Offload to a fresh thread with no loop of its own.
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        result = pool.submit(lambda: asyncio.run(_go())).result()
+
     return {"final_response": str(result.final_output)}
